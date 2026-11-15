@@ -1,12 +1,9 @@
-name: Build IsignX Zip Bundle (Release + Artifact)
+name: Build IsignX Artifact
 
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
-
-permissions:
-  contents: write
 
 jobs:
   build-isignx:
@@ -265,3 +262,4 @@ jobs:
                 return res.json({ status: "2fa_required" });
               }
 
+              const certId = `cert-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
