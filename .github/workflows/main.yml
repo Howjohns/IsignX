@@ -1,9 +1,12 @@
-name: Build IsignX Zip Bundle (Fixed zsign + Cert Export)
+name: Build IsignX Zip Bundle (Release + Artifact)
 
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build-isignx:
@@ -40,7 +43,7 @@ jobs:
             ZBIN=$(find /tmp/zsign_rel -type f -name "zsign*" ! -name "*.zip" ! -name "*.tar.gz" | head -n1)
             cp "$ZBIN" zsign/zsign
           else
-            git clone --depth 1 https://github.com/zhlynn/zsign.git /tmp/zsign
+            git clone --depth 1 https://github.com /tmp/zsign
             make -C /tmp/zsign/build/linux clean && make -C /tmp/zsign/build/linux
             ZBIN=$(find /tmp/zsign -type f -executable -name "zsign" | head -n1)
             cp "$ZBIN" zsign/zsign
@@ -255,4 +258,3 @@ jobs:
           });
 
           app.use(cors());
-          app.use(express.json());
