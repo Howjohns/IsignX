@@ -1,4 +1,4 @@
-name: Build 
+name: Build IsignX Zip Bundle (Fixed zsign + Cert Export)
 
 on:
   push:
@@ -16,16 +16,22 @@ jobs:
       - name: Install Build Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libssl-dev git zip
+          sudo apt-get install -y build-essential libssl-dev libminizip-dev pkg-config git curl zip
 
       - name: Create 4-Folder Filesystem
         run: |
           mkdir -p core zsign appleid install
 
-      - name: Compile Linux zsign into zsign/
+      - name: Install Linux zsign into zsign/ (Prebuilt with Source Fallback)
         run: |
-          git clone https://github.com /tmp/zsign
-          g++ /tmp/zsign/*.cpp /tmp/zsign/common/*.cpp -lcrypto -I/tmp/zsign -I/tmp/zsign/common -O3 -o zsign/zsign
+          rm -rf /tmp/zsign /tmp/zsign.tar.gz
+          if curl -fsSL "https://github.com" -o /tmp/zsign.tar.gz; then
+            tar -xzf /tmp/zsign.tar.gz -C zsign/
+          else
+            git clone --depth 1 https://github.com /tmp/zsign
+            make -C /tmp/zsign/build/linux
+            cp /tmp/zsign/bin/zsign zsign/zsign
+          fi
           chmod +x zsign/zsign
 
       - name: Generate zsign/signer.js (No get-task-allow / No JIT)
@@ -82,7 +88,6 @@ jobs:
             };
           }
 
-          // Bundles .p12, .mobileprovision, and password.txt into a downloadable ZIP for iOS Files
           function packageCertZip({ workDir, p12Path, provPath, p12Password, outZipPath }) {
             return new Promise((resolve, reject) => {
               const passFile = path.join(workDir, "password.txt");
@@ -198,7 +203,7 @@ jobs:
           module.exports = router;
           EOF
 
-      - name: Generate core/ (package.json, server.js with Cert Export, and index.html UI)
+      - name: Generate core/ (package.json, server.js, and index.html UI)
         run: |
           cat << 'EOF' > core/package.json
           {
@@ -249,7 +254,6 @@ jobs:
             res.json({ ok: true, pairingFile: false, getTaskAllow: false, certExport: true });
           });
 
-          // Export free 7-day .p12 + .mobileprovision + password.txt as a .zip
           app.post("/api/export-cert", async (req, res) => {
             try {
               const { appleId, password, twoFaCode, udid } = req.body;
@@ -258,7 +262,3 @@ jobs:
               }
 
               const auth = await authenticateAppleID({ appleId, password, twoFaCode, udid });
-              if (auth.status === "2fa_required") {
-                return res.json({ status: "2fa_required" });
-              }
-
