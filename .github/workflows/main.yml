@@ -13,42 +13,25 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout IsignX Repository
         uses: actions/checkout@v4
 
-      - name: Install Build Dependencies
+      - name: Checkout zhlynn/zsign Source
+        uses: actions/checkout@v4
+        with:
+          repository: zhlynn/zsign
+          path: zsign_src
+
+      - name: Install Build Dependencies & Compile zsign
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libssl-dev zlib1g-dev pkg-config git curl unzip zip
-
-      - name: Create 4-Folder Filesystem
-        run: |
+          sudo apt-get install -y build-essential libssl-dev zlib1g-dev pkg-config zip
           mkdir -p core zsign appleid install
-
-      - name: Install Linux zsign into zsign/ (Official Release Asset with Make Fallback)
-        run: |
-          rm -rf /tmp/zsign /tmp/zsign_rel
-          mkdir -p /tmp/zsign_rel
-          ASSET_URL=$(curl -fsSL https://github.com | grep -oE '"browser_download_url":\s*"[^"]*linux[^"]*x86_64[^"]*"' | head -n1 | cut -d'"' -f4)
-          if [ -n "$ASSET_URL" ]; then
-            echo "Downloading prebuilt zsign from $ASSET_URL"
-            curl -fsSL "$ASSET_URL" -o /tmp/zsign_rel/pkg
-            if file /tmp/zsign_rel/pkg | grep -qi "Zip archive"; then
-              unzip -q /tmp/zsign_rel/pkg -d /tmp/zsign_rel/
-            elif file /tmp/zsign_rel/pkg | grep -qi "gzip compressed"; then
-              tar -xzf /tmp/zsign_rel/pkg -C /tmp/zsign_rel/
-            else
-              mv /tmp/zsign_rel/pkg /tmp/zsign_rel/zsign
-            fi
-            ZBIN=$(find /tmp/zsign_rel -type f -name "zsign*" ! -name "*.zip" ! -name "*.tar.gz" | head -n1)
-            cp "$ZBIN" zsign/zsign
-          else
-            git clone --depth 1 https://github.com /tmp/zsign
-            make -C /tmp/zsign/build/linux clean && make -C /tmp/zsign/build/linux
-            ZBIN=$(find /tmp/zsign -type f -executable -name "zsign" | head -n1)
-            cp "$ZBIN" zsign/zsign
-          fi
+          make -C zsign_src/build/linux clean && make -C zsign_src/build/linux
+          ZBIN=$(find zsign_src -type f -executable -name "zsign" | head -n1)
+          cp "$ZBIN" zsign/zsign
           chmod +x zsign/zsign
+          rm -rf zsign_src
 
       - name: Generate zsign/signer.js (No get-task-allow / No JIT)
         run: |
@@ -258,3 +241,27 @@ jobs:
           });
 
           app.use(cors());
+          app.use(express.json());
+          app.use("/tmp", express.static(TMP_DIR));
+          app.use("/install", otaRoutes);
+
+          app.get("/", (req, res) => {
+            res.sendFile(path.join(__dirname, "index.html"));
+          });
+
+          app.get("/health", (req, res) => {
+            res.json({ ok: true, pairingFile: false, getTaskAllow: false, certExport: true });
+          });
+
+          app.post("/api/export-cert", async (req, res) => {
+            try {
+              const { appleId, password, twoFaCode, udid } = req.body;
+              if (!appleId || !password || !udid) {
+                return res.status(400).json({ error: "Apple ID, password, and UDID are required" });
+              }
+
+              const auth = await authenticateAppleID({ appleId, password, twoFaCode, udid });
+              if (auth.status === "2fa_required") {
+                return res.json({ status: "2fa_required" });
+              }
+
