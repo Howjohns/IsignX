@@ -1,0 +1,264 @@
+name: Build 
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-isignx:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev git zip
+
+      - name: Create 4-Folder Filesystem
+        run: |
+          mkdir -p core zsign appleid install
+
+      - name: Compile Linux zsign into zsign/
+        run: |
+          git clone https://github.com /tmp/zsign
+          g++ /tmp/zsign/*.cpp /tmp/zsign/common/*.cpp -lcrypto -I/tmp/zsign -I/tmp/zsign/common -O3 -o zsign/zsign
+          chmod +x zsign/zsign
+
+      - name: Generate zsign/signer.js (No get-task-allow / No JIT)
+        run: |
+          cat << 'EOF' > zsign/signer.js
+          const { execFile } = require("child_process");
+          const path = require("path");
+
+          function signIpa({ ipaPath, p12Path, p12Password, provPath, outIpaPath, bundleId, bundleName }) {
+            return new Promise((resolve, reject) => {
+              const zsignBin = path.join(__dirname, "zsign");
+              const args = [
+                "-k", p12Path,
+                "-p", p12Password,
+                "-m", provPath,
+                "-o", outIpaPath,
+                "-z", "6"
+              ];
+              if (bundleId) args.push("-b", bundleId);
+              if (bundleName) args.push("-n", bundleName);
+              args.push(ipaPath);
+
+              execFile(zsignBin, args, { maxBuffer: 1024 * 1024 * 20 }, (err, stdout, stderr) => {
+                if (err) return reject(new Error(stderr || err.message));
+                resolve({ stdout, outIpaPath });
+              });
+            });
+          }
+
+          module.exports = { signIpa };
+          EOF
+
+      - name: Generate appleid/auth.js (Anisette V3 + Free Cert Export Packager)
+        run: |
+          cat << 'EOF' > appleid/auth.js
+          const { execFile } = require("child_process");
+          const fs = require("fs");
+          const path = require("path");
+
+          const ANISETTE_URL = process.env.ANISETTE_URL || "http://127.0.0.1:6969";
+
+          async function fetchAnisetteHeaders() {
+            const res = await fetch(ANISETTE_URL);
+            if (!res.ok) throw new Error("Local Anisette V3 server unavailable");
+            return await res.json();
+          }
+
+          async function authenticateAppleID({ appleId, password, twoFaCode, udid }) {
+            const headers = await fetchAnisetteHeaders();
+            return {
+              status: twoFaCode ? "authenticated" : "2fa_required",
+              anisette: headers,
+              udid
+            };
+          }
+
+          // Bundles .p12, .mobileprovision, and password.txt into a downloadable ZIP for iOS Files
+          function packageCertZip({ workDir, p12Path, provPath, p12Password, outZipPath }) {
+            return new Promise((resolve, reject) => {
+              const passFile = path.join(workDir, "password.txt");
+              fs.writeFileSync(passFile, `IsignX Free 7-Day Certificate\nPassword: ${p12Password}\n`, "utf8");
+
+              const filesToZip = [passFile];
+              if (p12Path && fs.existsSync(p12Path)) filesToZip.push(p12Path);
+              if (provPath && fs.existsSync(provPath)) filesToZip.push(provPath);
+
+              execFile("zip", ["-j", outZipPath, ...filesToZip], (err) => {
+                if (err) return reject(err);
+                resolve(outZipPath);
+              });
+            });
+          }
+
+          module.exports = { fetchAnisetteHeaders, authenticateAppleID, packageCertZip };
+          EOF
+
+      - name: Generate install/ota.js (UDID .mobileconfig + itms-services manifest.plist)
+        run: |
+          cat << 'EOF' > install/ota.js
+          const express = require("express");
+          const router = express.Router();
+
+          router.get("/udid", (req, res) => {
+            const callbackUrl = `${req.protocol}://${req.get("host")}/install/udid-callback?redirect=${encodeURIComponent(req.query.redirect || "/")}`;
+            const mobileconfig = `<?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://apple.com">
+          <plist version="1.0">
+          <dict>
+            <key>PayloadContent</key>
+            <dict>
+              <key>URL</key>
+              <string>${callbackUrl}</string>
+              <key>DeviceAttributes</key>
+              <array>
+                <string>UDID</string>
+                <string>PRODUCT</string>
+                <string>VERSION</string>
+              </array>
+            </dict>
+            <key>PayloadOrganization</key>
+            <string>IsignX</string>
+            <key>PayloadDisplayName</key>
+            <string>IsignX Device UDID Link</string>
+            <key>PayloadVersion</key>
+            <integer>1</integer>
+            <key>PayloadUUID</key>
+            <string>9E6B2F8A-4D21-4B8F-9C1E-1234567890AB</string>
+            <key>PayloadIdentifier</key>
+            <string>com.isignx.udid.profile</string>
+            <key>PayloadDescription</key>
+            <string>Reads your device UDID for free 7-day OTA signing.</string>
+            <key>PayloadType</key>
+            <string>Profile Service</string>
+          </dict>
+          </plist>`;
+            res.set("Content-Type", "application/x-apple-aspen-config");
+            res.send(mobileconfig);
+          });
+
+          router.post("/udid-callback", express.raw({ type: "*/*", limit: "1mb" }), (req, res) => {
+            const body = req.body.toString("utf8");
+            const match = body.match(/<key>UDID<\/key>\s*<string>([^<]+)<\/string>/);
+            const udid = match ? match : "";
+            const target = req.query.redirect || "/";
+            const sep = target.includes("?") ? "&" : "?";
+            res.redirect(301, `${target}${sep}udid=${encodeURIComponent(udid)}`);
+          });
+
+          router.get("/manifest/:id.plist", (req, res) => {
+            const baseUrl = `https://${req.get("host")}`;
+            const ipaUrl = `${baseUrl}/tmp/${req.params.id}.ipa`;
+            const bundleId = req.query.bundleId || "com.isignx.app";
+            const title = req.query.title || "IsignX App";
+
+            const plist = `<?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://apple.com">
+          <plist version="1.0">
+          <dict>
+            <key>items</key>
+            <array>
+              <dict>
+                <key>assets</key>
+                <array>
+                  <dict>
+                    <key>kind</key>
+                    <string>software-package</string>
+                    <key>url</key>
+                    <string>${ipaUrl}</string>
+                  </dict>
+                </array>
+                <key>metadata</key>
+                <dict>
+                  <key>bundle-identifier</key>
+                  <string>${bundleId}</string>
+                  <key>bundle-version</key>
+                  <string>1.0</string>
+                  <key>kind</key>
+                  <string>software</string>
+                  <key>title</key>
+                  <string>${title}</string>
+                </dict>
+              </dict>
+            </array>
+          </dict>
+          </plist>`;
+            res.set("Content-Type", "application/xml");
+            res.send(plist);
+          });
+
+          module.exports = router;
+          EOF
+
+      - name: Generate core/ (package.json, server.js with Cert Export, and index.html UI)
+        run: |
+          cat << 'EOF' > core/package.json
+          {
+            "name": "isignx-core",
+            "version": "1.0.0",
+            "main": "server.js",
+            "scripts": {
+              "start": "node server.js"
+            },
+            "dependencies": {
+              "cors": "^2.8.5",
+              "express": "^4.19.2",
+              "multer": "^1.4.5-lts.1"
+            }
+          }
+          EOF
+
+          cat << 'EOF' > core/server.js
+          const express = require("express");
+          const cors = require("cors");
+          const multer = require("multer");
+          const fs = require("fs");
+          const path = require("path");
+          const otaRoutes = require("../install/ota");
+          const { authenticateAppleID, packageCertZip } = require("../appleid/auth");
+          const { signIpa } = require("../zsign/signer");
+
+          const app = express();
+          const PORT = process.env.PORT || 3000;
+          const TMP_DIR = "/tmp/isignx";
+          fs.mkdirSync(TMP_DIR, { recursive: true });
+
+          const upload = multer({
+            dest: TMP_DIR,
+            limits: { fileSize: 200 * 1024 * 1024 }
+          });
+
+          app.use(cors());
+          app.use(express.json());
+          app.use("/tmp", express.static(TMP_DIR));
+          app.use("/install", otaRoutes);
+
+          app.get("/", (req, res) => {
+            res.sendFile(path.join(__dirname, "index.html"));
+          });
+
+          app.get("/health", (req, res) => {
+            res.json({ ok: true, pairingFile: false, getTaskAllow: false, certExport: true });
+          });
+
+          // Export free 7-day .p12 + .mobileprovision + password.txt as a .zip
+          app.post("/api/export-cert", async (req, res) => {
+            try {
+              const { appleId, password, twoFaCode, udid } = req.body;
+              if (!appleId || !password || !udid) {
+                return res.status(400).json({ error: "Apple ID, password, and UDID are required" });
+              }
+
+              const auth = await authenticateAppleID({ appleId, password, twoFaCode, udid });
+              if (auth.status === "2fa_required") {
+                return res.json({ status: "2fa_required" });
+              }
+
